@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi.responses import JSONResponse
 from typing import Annotated
 import fastf1
 import fastf1.ergast
@@ -9,6 +10,10 @@ from app.core.serializers import dataframe_to_records, serialize
 from app.core.config import CACHE_DIR
 
 router = APIRouter(prefix="/f1", tags=["F1"])
+
+# In-memory cache for circuit layout — this data is immutable for a given round
+# so we never need to re-compute it after the first successful request.
+_circuit_cache: dict = {}
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -218,6 +223,92 @@ def get_telemetry(
         "frequency_hz": frequency,
         "telemetry": dataframe_to_records(tel[available]),
     }
+
+
+# ── GET /f1/circuit/{year}/{round} ───────────────────────────────────────────
+
+_SESSION_FALLBACK_ORDER = ["R", "Q", "FP3", "FP2", "FP1"]
+
+
+@router.get("/circuit/{year}/{round}", summary="Lightweight circuit layout for a race weekend")
+def get_circuit_layout(
+    year: Annotated[int, Path(ge=1950, le=2100)],
+    round: Annotated[int, Path(ge=1, le=25)],
+):
+    """
+    Returns a downsampled X/Y circuit outline derived from the fastest lap
+    of the most data-rich session available for the given round.
+
+    Session priority: Race → Qualifying → FP3 → FP2 → FP1.
+    Results are cached in memory — circuit layouts never change.
+    """
+    cache_key = (year, round)
+    if cache_key in _circuit_cache:
+        return JSONResponse(
+            content=_circuit_cache[cache_key],
+            headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
+        )
+
+    # Try sessions in priority order, stop at the first one that loads cleanly.
+    sess = None
+    for session_name in _SESSION_FALLBACK_ORDER:
+        try:
+            candidate = fastf1.get_session(year, round, session_name)
+            candidate.load(laps=True, telemetry=True, weather=False, messages=False)
+            if candidate.laps is not None and not candidate.laps.empty:
+                sess = candidate
+                break
+        except Exception:
+            continue
+
+    if sess is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No session data found for {year} round {round}",
+        )
+
+    # Pick fastest lap from the first driver that has telemetry with X/Y.
+    fastest = None
+    for driver in sess.laps["Driver"].unique():
+        try:
+            lap = sess.laps.pick_drivers(driver).pick_fastest()
+            tel = lap.get_telemetry()
+            if {"X", "Y"}.issubset(tel.columns) and tel["X"].notna().any():
+                fastest = tel
+                break
+        except Exception:
+            continue
+
+    if fastest is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No telemetry with X/Y coordinates found for {year} round {round}",
+        )
+
+    # Keep only the columns we need, drop null X/Y rows, downsample.
+    cols = [c for c in ["X", "Y", "Distance"] if c in fastest.columns]
+    layout = fastest[cols].dropna(subset=["X", "Y"]).iloc[::5].reset_index(drop=True)
+
+    points = [
+        {"x": round(row["X"], 3), "y": round(row["Y"], 3)}
+        | ({"distance": round(row["Distance"], 2)} if "Distance" in row else {})
+        for _, row in layout.iterrows()
+    ]
+
+    circuit_name = sess.event.get("CircuitShortName") or sess.event.get("EventName") or ""
+
+    payload = {
+        "year": year,
+        "round": round,
+        "circuit": str(circuit_name),
+        "points": points,
+    }
+
+    _circuit_cache[cache_key] = payload
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
+    )
 
 
 # ── GET /f1/standings/{year} ──────────────────────────────────────────────────
