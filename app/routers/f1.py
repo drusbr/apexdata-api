@@ -230,10 +230,10 @@ def get_telemetry(
 _SESSION_FALLBACK_ORDER = ["R", "Q", "FP3", "FP2", "FP1"]
 
 
-@router.get("/circuit/{year}/{round}", summary="Lightweight circuit layout for a race weekend")
+@router.get("/circuit/{year}/{round_number}", summary="Lightweight circuit layout for a race weekend")
 def get_circuit_layout(
     year: Annotated[int, Path(ge=1950, le=2100)],
-    round: Annotated[int, Path(ge=1, le=25)],
+    round_number: Annotated[int, Path(ge=1, le=25)],
 ):
     """
     Returns a downsampled X/Y circuit outline derived from the fastest lap
@@ -242,7 +242,7 @@ def get_circuit_layout(
     Session priority: Race → Qualifying → FP3 → FP2 → FP1.
     Results are cached in memory — circuit layouts never change.
     """
-    cache_key = (year, round)
+    cache_key = (year, round_number)
     if cache_key in _circuit_cache:
         return JSONResponse(
             content=_circuit_cache[cache_key],
@@ -253,7 +253,7 @@ def get_circuit_layout(
     sess = None
     for session_name in _SESSION_FALLBACK_ORDER:
         try:
-            candidate = fastf1.get_session(year, round, session_name)
+            candidate = fastf1.get_session(year, round_number, session_name)
             candidate.load(laps=True, telemetry=True, weather=False, messages=False)
             if candidate.laps is not None and not candidate.laps.empty:
                 sess = candidate
@@ -264,7 +264,7 @@ def get_circuit_layout(
     if sess is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No session data found for {year} round {round}",
+            detail=f"No session data found for {year} round {round_number}",
         )
 
     # Pick fastest lap from the first driver that has telemetry with X/Y.
@@ -282,7 +282,7 @@ def get_circuit_layout(
     if fastest is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No telemetry with X/Y coordinates found for {year} round {round}",
+            detail=f"No telemetry with X/Y coordinates found for {year} round {round_number}",
         )
 
     # Keep only the columns we need, drop null X/Y rows, downsample.
@@ -299,7 +299,7 @@ def get_circuit_layout(
 
     payload = {
         "year": year,
-        "round": round,
+        "round": round_number,
         "circuit": str(circuit_name),
         "points": points,
     }
