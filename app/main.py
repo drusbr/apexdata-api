@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import f1
+from app.routers import f1, standings
 
 app = FastAPI(
     title="ApexData API",
@@ -20,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(f1.router)
+app.include_router(standings.router)
 
 
 @app.get("/", include_in_schema=False)
