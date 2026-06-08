@@ -289,10 +289,20 @@ def _find_prev_year_round(year: int, round_number: int) -> int | None:
     """
     Look up the round number in {year-1} that corresponds to the same circuit
     as {year}/{round_number}, matching on Location then EventName.
+
+    Uses get_event_schedule(..., include_testing=False) for both years so that
+    round numbers are consistent with the frontend's numbering (testing rounds
+    excluded). get_event() can include testing in its count and return the wrong
+    event for a given round number.
+
     Returns the previous year's round number, or None if no match is found.
     """
     try:
-        target_event = fastf1.get_event(year, round_number)
+        target_schedule = fastf1.get_event_schedule(year, include_testing=False)
+        target_rows = target_schedule[target_schedule["RoundNumber"] == round_number]
+        if target_rows.empty:
+            return None
+        target_event = target_rows.iloc[0]
     except Exception:
         return None
 
