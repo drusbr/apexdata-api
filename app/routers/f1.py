@@ -285,6 +285,38 @@ def _try_load_circuit(year: int, round_number: int) -> dict | None:
     }
 
 
+def _find_prev_year_round(year: int, round_number: int) -> int | None:
+    """
+    Look up the round number in {year-1} that corresponds to the same circuit
+    as {year}/{round_number}, matching on Location then EventName.
+    Returns the previous year's round number, or None if no match is found.
+    """
+    try:
+        target_event = fastf1.get_event(year, round_number)
+    except Exception:
+        return None
+
+    target_location = str(target_event.get("Location") or "").strip().lower()
+    target_name = str(target_event.get("EventName") or "").strip().lower()
+
+    try:
+        prev_schedule = fastf1.get_event_schedule(year - 1, include_testing=False)
+    except Exception:
+        return None
+
+    for _, row in prev_schedule.iterrows():
+        prev_location = str(row.get("Location") or "").strip().lower()
+        prev_name = str(row.get("EventName") or "").strip().lower()
+
+        if (target_location and target_location == prev_location) or \
+           (target_name and target_name == prev_name):
+            round_val = row.get("RoundNumber")
+            if round_val is not None:
+                return int(round_val)
+
+    return None
+
+
 @router.get("/circuit/{year}/{round_number}", summary="Lightweight circuit layout for a race weekend")
 def get_circuit_layout(
     year: Annotated[int, Path(ge=1950, le=2100)],
@@ -295,8 +327,8 @@ def get_circuit_layout(
     of the most data-rich session available for the given round.
 
     Session priority: Race → Qualifying → FP3 → FP2 → FP1.
-    Falls back to {year-1}/{round_number} if the requested year has no data yet
-    (e.g. future rounds in the current season).
+    If the requested year/round has no data yet (e.g. a future race), falls back
+    to the same circuit in the previous year by matching on Location/EventName.
     Results are cached in memory — circuit layouts never change.
     """
     cache_key = (year, round_number)
@@ -306,15 +338,19 @@ def get_circuit_layout(
             headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
         )
 
+    # Primary attempt — requested year/round.
     payload = _try_load_circuit(year, round_number)
 
+    # Fallback — find the same circuit in the previous year's schedule.
     if payload is None:
-        payload = _try_load_circuit(year - 1, round_number)
+        prev_round = _find_prev_year_round(year, round_number)
+        if prev_round is not None:
+            payload = _try_load_circuit(year - 1, prev_round)
 
     if payload is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No circuit data available for this round",
+            detail="No circuit data available for this round",
         )
 
     _circuit_cache[cache_key] = payload
