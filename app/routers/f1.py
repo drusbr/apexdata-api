@@ -230,26 +230,12 @@ def get_telemetry(
 _SESSION_FALLBACK_ORDER = ["R", "Q", "FP3", "FP2", "FP1"]
 
 
-@router.get("/circuit/{year}/{round_number}", summary="Lightweight circuit layout for a race weekend")
-def get_circuit_layout(
-    year: Annotated[int, Path(ge=1950, le=2100)],
-    round_number: Annotated[int, Path(ge=1, le=25)],
-):
+def _try_load_circuit(year: int, round_number: int) -> dict | None:
     """
-    Returns a downsampled X/Y circuit outline derived from the fastest lap
-    of the most data-rich session available for the given round.
-
-    Session priority: Race → Qualifying → FP3 → FP2 → FP1.
-    Results are cached in memory — circuit layouts never change.
+    Attempt to load a circuit layout for the given year/round.
+    Returns a payload dict on success, or None if no usable data is found.
     """
-    cache_key = (year, round_number)
-    if cache_key in _circuit_cache:
-        return JSONResponse(
-            content=_circuit_cache[cache_key],
-            headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
-        )
-
-    # Try sessions in priority order, stop at the first one that loads cleanly.
+    # Try sessions in priority order, stop at the first one with lap data.
     sess = None
     for session_name in _SESSION_FALLBACK_ORDER:
         try:
@@ -262,12 +248,9 @@ def get_circuit_layout(
             continue
 
     if sess is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No session data found for {year} round {round_number}",
-        )
+        return None
 
-    # Pick fastest lap from the first driver that has telemetry with X/Y.
+    # Pick fastest lap from the first driver that returns X/Y telemetry.
     fastest = None
     for driver in sess.laps["Driver"].unique():
         try:
@@ -280,10 +263,7 @@ def get_circuit_layout(
             continue
 
     if fastest is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No telemetry with X/Y coordinates found for {year} round {round_number}",
-        )
+        return None
 
     # Keep only the columns we need, drop null X/Y rows, downsample.
     cols = [c for c in ["X", "Y", "Distance"] if c in fastest.columns]
@@ -297,12 +277,45 @@ def get_circuit_layout(
 
     circuit_name = sess.event.get("CircuitShortName") or sess.event.get("EventName") or ""
 
-    payload = {
+    return {
         "year": year,
         "round": round_number,
         "circuit": str(circuit_name),
         "points": points,
     }
+
+
+@router.get("/circuit/{year}/{round_number}", summary="Lightweight circuit layout for a race weekend")
+def get_circuit_layout(
+    year: Annotated[int, Path(ge=1950, le=2100)],
+    round_number: Annotated[int, Path(ge=1, le=25)],
+):
+    """
+    Returns a downsampled X/Y circuit outline derived from the fastest lap
+    of the most data-rich session available for the given round.
+
+    Session priority: Race → Qualifying → FP3 → FP2 → FP1.
+    Falls back to {year-1}/{round_number} if the requested year has no data yet
+    (e.g. future rounds in the current season).
+    Results are cached in memory — circuit layouts never change.
+    """
+    cache_key = (year, round_number)
+    if cache_key in _circuit_cache:
+        return JSONResponse(
+            content=_circuit_cache[cache_key],
+            headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
+        )
+
+    payload = _try_load_circuit(year, round_number)
+
+    if payload is None:
+        payload = _try_load_circuit(year - 1, round_number)
+
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No circuit data available for this round",
+        )
 
     _circuit_cache[cache_key] = payload
     return JSONResponse(
