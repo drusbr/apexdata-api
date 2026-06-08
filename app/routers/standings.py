@@ -11,7 +11,7 @@ async def _fetch_ergast(path: str) -> dict:
     url = f"{_ERGAST_BASE}/{path}"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
-            resp = await client.get(url)
+            resp = await client.get(url, follow_redirects=True)
             resp.raise_for_status()
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail="Upstream request to Ergast timed out")
