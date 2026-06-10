@@ -1,58 +1,64 @@
 """
-Supabase-backed response cache.
+Supabase-backed response cache using direct httpx HTTP calls to the REST API.
+No supabase-py dependency — httpx is already in requirements.txt.
 
-All functions are non-fatal — a cache failure never breaks an API response.
-The Supabase client is created lazily on first use, and returns None if the
-SUPABASE_URL / SUPABASE_KEY environment variables are not set, which means
-the API works identically without caching if Supabase is not configured.
+All functions are non-fatal: a cache failure never breaks an API response.
+If SUPABASE_URL / SUPABASE_KEY are not set the helpers return immediately,
+so the API works identically without caching when Supabase is not configured.
 """
 
 import os
-from supabase import create_client
+import httpx
 
-_client = None
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 
-def get_client():
-    global _client
-    if _client is None:
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
-        if url and key:
-            _client = create_client(url, key)
-    return _client
+def _headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
 
 
 def get_cached(table: str, match_fields: dict):
     """Return the cached ``data`` value or ``None`` if not found / on error."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
     try:
-        client = get_client()
-        if not client:
-            return None
-        result = (
-            client.table(table)
-            .select("data")
-            .match(match_fields)
-            .limit(1)
-            .execute()
+        params = {k: f"eq.{v}" for k, v in match_fields.items()}
+        params["select"] = "data"
+        params["limit"] = "1"
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=_headers(),
+            params=params,
+            timeout=3.0,
         )
-        if result.data and len(result.data) > 0:
-            return result.data[0]["data"]
+        if r.status_code == 200 and r.json():
+            print(f"[Cache] HIT {table} {match_fields}")
+            return r.json()[0]["data"]
+        print(f"[Cache] MISS {table} {match_fields}")
         return None
     except Exception as e:
-        print(f"[Cache] Read failed for {table}: {e}")
+        print(f"[Cache] Read failed: {e}")
         return None
 
 
 def set_cache(table: str, match_fields: dict, data):
     """Upsert *data* into the cache table — never raises, failure is non-fatal."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
     try:
-        client = get_client()
-        if not client:
-            return
-        client.table(table).upsert(
-            {**match_fields, "data": data, "cached_at": "now()"}
-        ).execute()
+        payload = {**match_fields, "data": data}
+        httpx.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers=_headers(),
+            json=payload,
+            timeout=5.0,
+        )
         print(f"[Cache] Stored {table} {match_fields}")
     except Exception as e:
-        print(f"[Cache] Write failed for {table}: {e}")
+        print(f"[Cache] Write failed: {e}")
