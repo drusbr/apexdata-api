@@ -8,6 +8,7 @@ import pandas as pd
 from app.core.fastf1_client import load_session
 from app.core.serializers import dataframe_to_records, serialize
 from app.core.config import CACHE_DIR
+from app.cache import get_cached, set_cache
 
 router = APIRouter(prefix="/f1", tags=["F1"])
 
@@ -92,6 +93,13 @@ def get_results(
     session: str,
 ):
     """Race, qualifying, sprint, or practice results."""
+    _ck = {"season": year, "round": round, "session_type": session.lower()}
+    _hit = get_cached("results_cache", _ck)
+    if _hit:
+        print(f"[Cache] HIT results {year}/{round}/{session}")
+        return _hit
+    print(f"[Cache] MISS results {year}/{round}/{session}")
+
     sess = _safe_load(year, round, session)
 
     results: pd.DataFrame = sess.results
@@ -107,13 +115,15 @@ def get_results(
         "Time", "FastestLap", "FastestLapTime", "FastestLapSpeed",
     ]
     available = [c for c in cols if c in results.columns]
-    return {
+    result = {
         "year": year,
         "round": round,
         "session": sess.name,
         "event": sess.event.get("EventName"),
         "results": dataframe_to_records(results[available]),
     }
+    set_cache("results_cache", _ck, result)
+    return result
 
 
 # ── GET /f1/laps/{year}/{round}/{session}/{driver} ───────────────────────────
@@ -127,6 +137,21 @@ def get_laps(
     accurate_only: bool = Query(False, description="Return only accurately timed laps"),
 ):
     """All lap times for a specific driver in a session."""
+    _ck = {
+        "season": year,
+        "round": round,
+        "session_type": session.lower(),
+        "driver_code": driver.upper(),
+    }
+    # Only use the cache when accurate_only=False (the default, most-common path).
+    # accurate_only=True is a less-common variant; skip caching to keep logic simple.
+    if not accurate_only:
+        _hit = get_cached("lap_times_cache", _ck)
+        if _hit:
+            print(f"[Cache] HIT laps {year}/{round}/{session}/{driver}")
+            return _hit
+        print(f"[Cache] MISS laps {year}/{round}/{session}/{driver}")
+
     sess = _safe_load(year, round, session)
 
     try:
@@ -149,7 +174,7 @@ def get_laps(
     ]
     available = [c for c in cols if c in laps.columns]
 
-    return {
+    result = {
         "year": year,
         "round": round,
         "session": sess.name,
@@ -157,6 +182,9 @@ def get_laps(
         "lap_count": len(laps),
         "laps": dataframe_to_records(laps[available]),
     }
+    if not accurate_only:
+        set_cache("lap_times_cache", _ck, result)
+    return result
 
 
 # ── GET /f1/telemetry/{year}/{round}/{session}/{driver}/{lap} ─────────────────
@@ -176,6 +204,22 @@ def get_telemetry(
     ),
 ):
     """Car telemetry channels for a specific lap."""
+    _ck = {
+        "season": year,
+        "round": round,
+        "session_type": session.lower(),
+        "driver_code": driver.upper(),
+        "lap_number": lap,
+    }
+    # Cache at default frequency only — resampled variants are not cached.
+    _use_cache = (frequency == 10)
+    if _use_cache:
+        _hit = get_cached("telemetry_cache", _ck)
+        if _hit:
+            print(f"[Cache] HIT telemetry {year}/{round}/{session}/{driver}/{lap}")
+            return _hit
+        print(f"[Cache] MISS telemetry {year}/{round}/{session}/{driver}/{lap}")
+
     sess = _safe_load(year, round, session)
 
     try:
@@ -211,7 +255,7 @@ def get_telemetry(
     ]
     available = [c for c in cols if c in tel.columns]
 
-    return {
+    result = {
         "year": year,
         "round": round,
         "session": sess.name,
@@ -223,6 +267,9 @@ def get_telemetry(
         "frequency_hz": frequency,
         "telemetry": dataframe_to_records(tel[available]),
     }
+    if _use_cache:
+        set_cache("telemetry_cache", _ck, result)
+    return result
 
 
 # ── GET /f1/circuit/{year}/{round} ───────────────────────────────────────────
@@ -341,12 +388,24 @@ def get_circuit_layout(
     to the same circuit in the previous year by matching on Location/EventName.
     Results are cached in memory — circuit layouts never change.
     """
-    cache_key = (year, round_number)
-    if cache_key in _circuit_cache:
+    mem_key = (year, round_number)
+    if mem_key in _circuit_cache:
         return JSONResponse(
-            content=_circuit_cache[cache_key],
+            content=_circuit_cache[mem_key],
             headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
         )
+
+    # Check Supabase before doing the expensive FastF1 load.
+    _ck = {"season": year, "round": round_number}
+    _hit = get_cached("circuit_cache", _ck)
+    if _hit:
+        print(f"[Cache] HIT circuit {year}/{round_number}")
+        _circuit_cache[mem_key] = _hit
+        return JSONResponse(
+            content=_hit,
+            headers={"Cache-Control": "public, max-age=2592000"},
+        )
+    print(f"[Cache] MISS circuit {year}/{round_number}")
 
     # Primary attempt — requested year/round.
     payload = _try_load_circuit(year, round_number)
@@ -363,7 +422,8 @@ def get_circuit_layout(
             detail="No circuit data available for this round",
         )
 
-    _circuit_cache[cache_key] = payload
+    _circuit_cache[mem_key] = payload
+    set_cache("circuit_cache", _ck, payload)
     return JSONResponse(
         content=payload,
         headers={"Cache-Control": "public, max-age=2592000"},  # 30 days
